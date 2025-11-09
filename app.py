@@ -1,10 +1,12 @@
 from fastapi import FastAPI, Query
 import pandas as pd
-from sentence_transformers import SentenceTransformer, util
+from transformers import AutoTokenizer, AutoModel
+import torch
+import torch.nn.functional as F
 
 app = FastAPI()
 
-# Load sample SHL dataset
+# Sample SHL-style dataset
 data = {
     "assessment_name": [
         "Data Analysis Test",
@@ -38,19 +40,30 @@ data = {
 
 df = pd.DataFrame(data)
 
-# Load Sentence-BERT model
-model = SentenceTransformer("all-MiniLM-L6-v2")
+# Use a light model
+model_name = "sentence-transformers/paraphrase-MiniLM-L3-v2"
+tokenizer = AutoTokenizer.from_pretrained(model_name)
+model = AutoModel.from_pretrained(model_name)
 
-# Precompute embeddings for each assessment
-df["embeddings"] = df["description"].apply(lambda x: model.encode(x, convert_to_tensor=True))
+# Compute sentence embeddings
+def get_embedding(text):
+    inputs = tokenizer(text, return_tensors="pt", truncation=True, padding=True)
+    with torch.no_grad():
+        outputs = model(**inputs)
+        embeddings = outputs.last_hidden_state.mean(dim=1)
+    return F.normalize(embeddings, p=2, dim=1)
+
+df["embeddings"] = df["description"].apply(lambda x: get_embedding(x))
 
 @app.get("/")
 def home():
-    return {"message": "Assessment Recommendation Engine is running!"}
+    return {"message": "Assessment Recommendation Engine (Light) is running!"}
 
 @app.get("/recommend")
 def recommend(query: str = Query(..., description="Enter job description or skills")):
-    query_emb = model.encode(query, convert_to_tensor=True)
-    df["score"] = df["embeddings"].apply(lambda x: float(util.cos_sim(query_emb, x)))
+    query_emb = get_embedding(query)
+    df["score"] = df["embeddings"].apply(lambda x: float(torch.mm(query_emb, x.T)))
     results = df.sort_values(by="score", ascending=False).head(3)[["assessment_name", "role", "score"]]
     return results.to_dict(orient="records")
+
+
